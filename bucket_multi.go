@@ -156,6 +156,36 @@ func (item *RemoveOp) execute(b *Bucket, signal chan BulkOp) {
 	}
 }
 
+type RemoveMetaOp struct {
+	bulkOp
+
+	Key      string
+	Extra    []byte
+	Flags    uint32
+	Expiry   uint32
+	Cas      Cas
+	OldCas   uint64
+	RevSeqno uint64
+	Err      error
+}
+
+func (item *RemoveMetaOp) execute(b *Bucket, signal chan BulkOp) {
+	op, err := b.client.DeleteMeta([]byte(item.Key), item.Extra, item.Flags, item.Expiry, item.OldCas, item.RevSeqno,
+		func(cas gocbcore.Cas, mutToken gocbcore.MutationToken, err error) {
+			item.Err = err
+			if item.Err == nil {
+				item.Cas = Cas(cas)
+			}
+			signal <- item
+		})
+	if err != nil {
+		item.Err = err
+		signal <- item
+	} else {
+		item.bulkOp.pendop = op
+	}
+}
+
 type UpsertOp struct {
 	bulkOp
 
@@ -173,6 +203,43 @@ func (item *UpsertOp) execute(b *Bucket, signal chan BulkOp) {
 		signal <- item
 	} else {
 		op, err := b.client.Set([]byte(item.Key), bytes, flags, item.Expiry,
+			func(cas gocbcore.Cas, mutToken gocbcore.MutationToken, err error) {
+				item.Err = err
+				if item.Err == nil {
+					item.Cas = Cas(cas)
+				}
+				signal <- item
+			})
+		if err != nil {
+			item.Err = err
+			signal <- item
+		} else {
+			item.bulkOp.pendop = op
+		}
+	}
+}
+
+type UpsertMetaOp struct {
+	bulkOp
+
+	Key      string
+	Value    interface{}
+	Extra    []byte
+	Expiry   uint32
+	Flags    uint32
+	Cas      Cas
+	OldCas   uint64
+	RevSeqno uint64
+	Err      error
+}
+
+func (item *UpsertMetaOp) execute(b *Bucket, signal chan BulkOp) {
+	bytes, _, err := b.transcoder.Encode(item.Value)
+	if err != nil {
+		item.Err = err
+		signal <- item
+	} else {
+		op, err := b.client.SetMeta([]byte(item.Key), bytes, item.Extra, item.Flags, item.Expiry, item.OldCas, item.RevSeqno,
 			func(cas gocbcore.Cas, mutToken gocbcore.MutationToken, err error) {
 				item.Err = err
 				if item.Err == nil {
