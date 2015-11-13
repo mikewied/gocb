@@ -1,6 +1,8 @@
 package gocb
 
 import (
+	"sync"
+
 	"github.com/couchbase/gocb/gocbcore"
 )
 
@@ -66,4 +68,66 @@ func (b *Bucket) removeMeta(key string, extra []byte, flags uint32, expiry uint3
 		op, err := b.client.DeleteMeta([]byte(key), extra, flags, expiry, cas, revseqno, gocbcore.RemoveCallback(cb))
 		return op, err
 	})
+}
+
+type Future struct {
+	op   gocbcore.PendingOp
+	cas  Cas
+	err  error
+	done bool
+	wg   sync.WaitGroup
+}
+
+func (f *Future) setOperation(op gocbcore.PendingOp) {
+	f.op = op
+}
+
+func (f *Future) complete(cas Cas, err error) {
+	f.cas = cas
+	f.err = err
+	f.wg.Done()
+}
+
+func (f *Future) Get() (Cas, error) {
+	f.wg.Wait()
+	return f.cas, f.err
+}
+
+func (f *Future) Cancel() {
+	f.op.Cancel()
+}
+
+func (bi *bucketInternal) AsyncUpsertMeta(key string, value, extra []byte, flags uint32, expiry uint32, cas, revseqno uint64) *Future {
+	rv := &Future{}
+	rv.wg.Add(1)
+	op, err := bi.b.client.SetMeta([]byte(key), value, extra, flags, expiry, cas, revseqno,
+		func(cas gocbcore.Cas, mt gocbcore.MutationToken, err error) {
+			rv.complete(Cas(cas), err)
+	})
+
+	rv.setOperation(op)
+
+	if err != nil {
+		rv.complete(Cas(0), err)
+	}
+
+	return rv
+}
+
+func (bi *bucketInternal) AsyncUpsert(key string, value []byte, expiry uint32) *Future {
+
+	rv := &Future{}
+	rv.wg.Add(1)
+	op, err := bi.b.client.Set([]byte(key), value, 0, expiry,
+		func(cas gocbcore.Cas, mt gocbcore.MutationToken, err error) {
+			rv.complete(Cas(cas), err)
+	})
+
+	rv.setOperation(op)
+
+	if err != nil {
+		rv.complete(Cas(0), err)
+	}
+
+	return rv
 }
