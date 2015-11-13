@@ -1,6 +1,9 @@
 package gocb
 
 import (
+	"sync"
+	"time"
+
 	"github.com/couchbase/gocb/gocbcore"
 )
 
@@ -66,4 +69,101 @@ func (b *Bucket) removeMeta(key string, extra []byte, flags uint32, expiry uint3
 		op, err := b.client.DeleteMeta([]byte(key), extra, flags, expiry, cas, revseqno, gocbcore.RemoveCallback(cb))
 		return op, err
 	})
+}
+
+type FutureStatus int
+
+const (
+	Pending   = FutureStatus(1)
+	Done      = FutureStatus(2)
+	Cancelled = FutureStatus(3)
+	Timeout   = FutureStatus(4)
+)
+
+type Future struct {
+	op     gocbcore.PendingOp
+	cas    Cas
+	err    error
+	status FutureStatus
+	wg     sync.WaitGroup
+	mutex  sync.Mutex
+}
+
+func (f *Future) initialize(count int) {
+	f.status = Pending
+	f.wg.Add(count)
+}
+
+func (f *Future) setOperation(op gocbcore.PendingOp) {
+	f.op = op
+}
+
+func (f *Future) complete(cas Cas, err error) {
+	f.cas = cas
+	f.err = err
+	f.mutex.Lock()
+	if f.status == Pending {
+		f.wg.Done()
+		f.status = Done
+	}
+	f.mutex.Unlock()
+}
+
+func (f *Future) Get() (Cas, error) {
+	t := time.AfterFunc(5 * time.Second, func() {
+		f.mutex.Lock()
+		if f.status == Pending {
+			f.wg.Done()
+			f.status = Timeout
+		}
+		f.mutex.Unlock()
+	})
+
+	f.wg.Wait()
+	t.Stop()
+	return f.cas, f.err
+}
+
+func (f *Future) Cancel() {
+	f.mutex.Lock()
+	if f.status == Pending {
+		f.wg.Done()
+		f.op.Cancel()
+		f.status = Done
+	}
+	f.mutex.Unlock()
+}
+
+func (bi *bucketInternal) AsyncUpsertMeta(key string, value, extra []byte, flags uint32, expiry uint32, cas, revseqno uint64) *Future {
+	rv := &Future{}
+	rv.initialize(1)
+	op, err := bi.b.client.SetMeta([]byte(key), value, extra, flags, expiry, cas, revseqno,
+		func(cas gocbcore.Cas, mt gocbcore.MutationToken, err error) {
+			rv.complete(Cas(cas), err)
+	})
+
+	rv.setOperation(op)
+
+	if err != nil {
+		rv.complete(Cas(0), err)
+	}
+
+	return rv
+}
+
+func (bi *bucketInternal) AsyncRemoveMeta(key string, extra []byte, flags uint32, expiry uint32, cas, revseqno uint64) *Future {
+	rv := &Future{}
+	rv.initialize(1)
+	op, err := bi.b.client.DeleteMeta([]byte(key), extra, flags, expiry, cas, revseqno,
+		func(cas gocbcore.Cas, mt gocbcore.MutationToken, err error) {
+			rv.complete(Cas(cas), err)
+	})
+
+	rv.setOperation(op)
+
+	if err != nil {
+		rv.complete(Cas(0), err)
+	}
+
+	return rv
 }
